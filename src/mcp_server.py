@@ -3,6 +3,8 @@ from instagrapi import Client
 import argparse
 from typing import Optional, List, Dict, Any
 import os
+import sys
+import time
 from dotenv import load_dotenv
 import logging
 from pathlib import Path
@@ -18,7 +20,75 @@ INSTRUCTIONS = """
 This server is used to send messages to a user on Instagram.
 """
 
-client = Client()
+# Challenge code file — write the 6-digit code here when prompted
+CHALLENGE_CODE_FILE = Path("challenge_code.txt")
+CHALLENGE_TIMEOUT = 300  # seconds to wait for code
+
+
+def challenge_code_handler(username: str, choice=None) -> str:
+    """Handle Instagram challenge by reading code from a file.
+
+    When Instagram requires a verification code (SMS/email), this handler
+    waits for the user to write the code to challenge_code.txt.
+    """
+    logger.info(f"Challenge required for {username} (method: {choice})")
+    logger.info(f"Instagram sent a verification code via {choice}.")
+    logger.info(f"Write the 6-digit code to: {CHALLENGE_CODE_FILE.absolute()}")
+    print(f"\n{'='*60}", file=sys.stderr)
+    print(f"CHALLENGE REQUIRED for {username}", file=sys.stderr)
+    print(f"Instagram sent a verification code via: {choice}", file=sys.stderr)
+    print(f"Write the 6-digit code to: {CHALLENGE_CODE_FILE.absolute()}", file=sys.stderr)
+    print(f"Waiting up to {CHALLENGE_TIMEOUT}s...", file=sys.stderr)
+    print(f"{'='*60}\n", file=sys.stderr)
+
+    # Clear any old code
+    if CHALLENGE_CODE_FILE.exists():
+        CHALLENGE_CODE_FILE.unlink()
+
+    # Poll for the code file
+    start = time.time()
+    while time.time() - start < CHALLENGE_TIMEOUT:
+        if CHALLENGE_CODE_FILE.exists():
+            code = CHALLENGE_CODE_FILE.read_text().strip()
+            if code and code.isdigit() and len(code) == 6:
+                logger.info(f"Challenge code received: {code}")
+                CHALLENGE_CODE_FILE.unlink()
+                return code
+            else:
+                logger.warning(f"Invalid code in file: '{code}', waiting for valid 6-digit code...")
+        time.sleep(2)
+
+    raise TimeoutError(f"No challenge code provided within {CHALLENGE_TIMEOUT}s")
+
+
+def create_client() -> Client:
+    """Create an Instagram client with challenge handling and tolerant login flow."""
+    cl = Client()
+    cl.challenge_code_handler = challenge_code_handler
+
+    # Fix 467/unsupported_version error by using a recent Instagram app version
+    cl.set_user_agent(
+        "Instagram 410.0.0.0.96 Android (33/13; 480dpi; 1080x2400; xiaomi; M2007J20CG; surya; qcom; en_US; 641123490)"
+    )
+
+    # Patch login_flow to be tolerant of errors.
+    # The default login_flow fetches reels_tray and timeline, which can trigger
+    # challenges that return HTML instead of JSON, crashing the login.
+    # Since we only need DM access, we can safely skip these post-login steps.
+    original_login_flow = cl.login_flow
+
+    def tolerant_login_flow() -> bool:
+        try:
+            return original_login_flow()
+        except Exception as e:
+            logger.warning(f"login_flow failed (non-fatal, DM access may still work): {e}")
+            return True
+
+    cl.login_flow = tolerant_login_flow
+    return cl
+
+
+client = create_client()
 
 mcp = FastMCP(
    name="Instagram DMs",
@@ -155,7 +225,7 @@ def list_chats(
         return {field: t.get(field) for field in fields}
 
     try:
-        threads = client.direct_threads(amount, selected_filter, thread_message_limit)
+        threads = client.direct_threads(amount, selected_filter, thread_message_limit=thread_message_limit)
         if full:
             return {"success": True, "threads": [t.dict() if hasattr(t, 'dict') else str(t) for t in threads]}
         elif fields:
@@ -876,27 +946,40 @@ if __name__ == "__main__":
        print("2. Use --username and --password command line arguments")
        exit(1)
 
+   SESSION_FILE = Path(f"{username}_session.json")
+
    try:
        logger.info("Attempting to login to Instagram...")
-       
-       # CRITICAL FIX: Session file handling for persistent authentication
-       # Without this, Instagram login hangs due to rate limiting and security measures
-       # Session files allow Instagram to recognize the client and avoid fresh authentication
-       # This prevents the MCP server from hanging after "🚀 Attempting to send DM"
-       SESSION_FILE = Path(f"{username}_session.json")
+
        if SESSION_FILE.exists():
            logger.info(f"Loading existing session from {SESSION_FILE}")
            client.load_settings(SESSION_FILE)
-       
+
        client.login(username, password)
-       
-       # Save session for future use to avoid repeated fresh authentication
+
+       # Save session for future use
        client.dump_settings(SESSION_FILE)
        logger.info(f"Session saved to {SESSION_FILE}")
-       
+
        logger.info("Successfully logged in to Instagram")
        mcp.run(transport="stdio")
    except Exception as e:
-       logger.error(f"Failed to login to Instagram: {str(e)}")
-       print(f"Error: Failed to login to Instagram - {str(e)}")
-       exit(1)
+       logger.error(f"Login failed: {str(e)}")
+
+       # If we had a session file, it might be stale — delete and retry once
+       if SESSION_FILE.exists():
+           logger.info("Deleting stale session and retrying fresh login...")
+           SESSION_FILE.unlink()
+           try:
+               client = create_client()
+               client.login(username, password)
+               client.dump_settings(SESSION_FILE)
+               logger.info("Successfully logged in with fresh session")
+               mcp.run(transport="stdio")
+           except Exception as e2:
+               logger.error(f"Fresh login also failed: {str(e2)}")
+               print(f"Error: Failed to login to Instagram - {str(e2)}", file=sys.stderr)
+               exit(1)
+       else:
+           print(f"Error: Failed to login to Instagram - {str(e)}", file=sys.stderr)
+           exit(1)
