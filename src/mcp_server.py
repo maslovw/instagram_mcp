@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 import logging
 from pathlib import Path
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file (don't override system env vars)
+load_dotenv(override=False)
 
 # Set up logger
 logger = logging.getLogger(__name__)

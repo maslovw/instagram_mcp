@@ -8,20 +8,22 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=False)
 
 
 def login(args):
     """Login and initialize the shared client."""
-    from src.mcp_server import client, create_client
-    import src.mcp_server as mcp_server
-
-    username = getattr(args, "username", None) or os.getenv("INSTAGRAM_USERNAME")
-    password = getattr(args, "password", None) or os.getenv("INSTAGRAM_PASSWORD")
+    username = getattr(args, "username", None) or os.environ.get("INSTAGRAM_USERNAME")
+    password = getattr(args, "password", None) or os.environ.get("INSTAGRAM_PASSWORD")
 
     if not username or not password:
         print("Error: credentials required. Set INSTAGRAM_USERNAME/INSTAGRAM_PASSWORD env vars or use --username/--password.", file=sys.stderr)
+        print(f"  INSTAGRAM_USERNAME={'set' if username else 'not set'}", file=sys.stderr)
+        print(f"  INSTAGRAM_PASSWORD={'set' if password else 'not set'}", file=sys.stderr)
         sys.exit(1)
+
+    from src.mcp_server import client, create_client
+    import src.mcp_server as mcp_server
 
     session_file = Path(f"{username}_session.json")
 
