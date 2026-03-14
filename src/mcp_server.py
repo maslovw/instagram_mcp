@@ -71,6 +71,40 @@ def create_client() -> Client:
         "Instagram 410.0.0.0.96 Android (33/13; 480dpi; 1080x2400; xiaomi; M2007J20CG; surya; qcom; en_US; 641123490)"
     )
 
+    # Patch challenge_resolve_simple to handle unknown bloks-based challenges.
+    # Instagram's newer challenge flows return step_name="STEP_NAME" which
+    # instagrapi doesn't recognize, causing ChallengeUnknownStep. We intercept
+    # this and request a verification code via SMS/email instead.
+    from instagrapi.exceptions import ChallengeUnknownStep
+    original_challenge_resolve = cl.challenge_resolve_simple
+
+    def patched_challenge_resolve(challenge_url, **kwargs):
+        try:
+            return original_challenge_resolve(challenge_url, **kwargs)
+        except ChallengeUnknownStep as e:
+            logger.warning(f"Unknown challenge step, attempting manual code request: {e}")
+            # Request verification code via SMS (choice=0) or email (choice=1)
+            for choice in (0, 1):
+                try:
+                    cl.private_request(
+                        challenge_url.replace("/api/v1/", ""),
+                        data={"choice": str(choice)},
+                    )
+                    logger.info(f"Verification code requested (choice={choice})")
+                    code = challenge_code_handler(cl.username, choice="sms" if choice == 0 else "email")
+                    result = cl.private_request(
+                        challenge_url.replace("/api/v1/", ""),
+                        data={"security_code": code},
+                    )
+                    if result.get("logged_in_user"):
+                        return True
+                except Exception as inner_e:
+                    logger.warning(f"Challenge choice {choice} failed: {inner_e}")
+                    continue
+            raise
+
+    cl.challenge_resolve_simple = patched_challenge_resolve
+
     # Patch login_flow to be tolerant of errors.
     # The default login_flow fetches reels_tray and timeline, which can trigger
     # challenges that return HTML instead of JSON, crashing the login.
